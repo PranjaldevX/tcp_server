@@ -69,16 +69,6 @@ a bigger length closes the connection.
 - **ack mode:** request payload = `[type 1][sequence id, 4 bytes][optional body]`, reply payload = `[type 2][same sequence id]`.
   A request that is too short or has the wrong type closes the connection.
 
-## How to read the code (suggested order)
-
-1. `frame_protocol.h`, then `tests/test_frame_protocol.cpp`: how a byte stream becomes messages.
-2. `message_handler.h`: what the server does with a message.
-3. `connection.h`: what we remember about one client.
-4. `worker.cpp`, in this order: `run()`, `accept_new_connections()`, `handle_readable()`,
-   `send_or_queue()`, `handle_writable()`, `update_epoll_interest()`, `close_connection()`.
-5. `epoll_server_main.cpp`: how workers are started and stopped.
-6. `baseline_server_main.cpp`: the same job done the simple blocking way. Compare it with step 4.
-7. `tools/load_generator.cpp`.
 
 One request, start to finish: epoll says a socket is readable -> `recv()` into the scratch buffer ->
 `check_frame()` finds whole frames -> `append_reply()` builds the replies -> `send()` right away.
@@ -104,55 +94,7 @@ scripts/run_benchmark.sh 5 100 20000 64 10      # runs, connections, requests/s,
 python3 scripts/summarize_results.py benchmark_results/results_<timestamp>.csv
 ```
 
-- Final numbers must come from **native Linux** (or a cloud VM), not WSL2: it is virtualized and noisy (SRS 2.4).
-  `scripts/collect_environment.sh` records the machine details; the benchmark script saves them next to the CSV.
-- Server and load generator share the machine, so give them different cores (`taskset`) or use a second machine.
-  Add `--threads` to the generator if one thread can't produce the rate.
-- The generator is open loop by default: latency counts from the *intended* send time, which avoids coordinated omission.
-  Run it once with `--closed-loop` to see how much a closed-loop test would hide.
-- To measure a v2 switch before/after (PR-3), edit the `SERVERS` list in `run_benchmark.sh`
-  (e.g. add `epoll_writev|build/epoll_server --writev`).
 
-## SRS traceability
-
-| Requirement | Where | Checked by |
-| --- | --- | --- |
-| FR-1 non-blocking accept | `Worker::accept_new_connections` | all integration tests |
-| FR-2 epoll reactor | `Worker::run` | all integration tests |
-| FR-3 per-connection state | `connection.h` | |
-| FR-4 partial reads | `Worker::handle_readable` (`unparsed_bytes`) | byte-by-byte and split-header tests |
-| FR-5 partial writes | `Worker::send_or_queue`, `handle_writable` | slow-reader tests (also with `--writev`) |
-| FR-6 clean close | `Worker::close_connection` | client-leaves-mid-frame test, sanitizer exit codes |
-| FR-7 idle timeout | `Worker::close_idle_connections` | idle / keeps-talking tests |
-| FR-8 framing | `frame_protocol.h` | `test_frame_protocol` |
-| FR-9 oversize frame | `check_frame` -> `PROTOCOL_ERROR` | oversize test |
-| FR-10 echo, FR-11 ack | `message_handler.h` | `test_message_handler`, echo and ack tests |
-| FR-12 backpressure | `Worker::update_epoll_interest` | does-not-read test (client blocks, memory bounded, `reads_paused` > 0) |
-| FR-13 counters | `server_stats.h` | stats test |
-| FR-14 graceful shutdown | `epoll_server_main.cpp`, `Worker::run` | SIGTERM test |
-| FR-15 multi-reactor | one `Worker` per thread, `SO_REUSEPORT` | 2- and 4-worker tests, TSan run |
-| FR-16 buffer pool | `buffer_pool.h` | `test_buffer_pool`, `test_allocations.py` |
-| FR-17 `TCP_NODELAY`, `writev`, pinning | `--tcp-nodelay`, `--writev`, `--pin-cpus` | functional tests only (see below) |
-| FR-18 order-book gateway (optional) | **not implemented** | |
-| FR-19 baseline server | `baseline_server_main.cpp` | baseline tests |
-| FR-20 load generator | `tools/load_generator.cpp` | smoke-tested against both servers |
-| PR-1 10,000 idle connections | | `test_ten_thousand_idle_connections` |
-| PR-2 .. PR-6 benchmark rules | `scripts/` | **needs your measurements** |
-
-## What has and has not been verified
-
-Verified (in a Linux sandbox with 1 CPU core): everything compiles without warnings under `-Wall -Wextra`;
-all unit tests pass; all 30 integration tests pass on the normal build, the ASan/UBSan build, and
-(minus the 10k test) the ThreadSanitizer build; steady-state traffic caused no heap allocations on worker
-threads; the load generator and benchmark scripts run end to end.
-
-**Not** done, because it can only be done on your machine:
-- No performance numbers are claimed. The sandbox has one core and runs inside a container, so any
-  throughput or latency from it is meaningless. PR-2 (epoll beats baseline) and PR-3 (each v2 switch is a
-  measured gain) are open until you run the benchmark on native Linux.
-- FR-17 is only checked for *working*, not for being *faster*. It may turn out to make no difference or
-  to be slower. That is what the before/after run is for.
-- The buffer pool is always on, so there is no switch to compare "with" and "without".
 
 ## Design notes and known limits
 
